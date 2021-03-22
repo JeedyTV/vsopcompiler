@@ -1,0 +1,361 @@
+from sly import Parser
+from Lexer import CalcLexer,error
+from Ast import *
+
+class CalcParser(Parser):
+    
+    tokens = (CalcLexer.tokens | {AND, BOOL, CLASS, DO, ELSE, EXTENDS, FALSE, IF, INT32, IN,
+    ISNULL, LET, NEW, NOT, SELF, STRING, THEN, TRUE, UNIT, WHILE,
+    LOWER_EQUAL, ASSIGN, LBRACE, RBRACE, LPAR, RPAR, COLON,
+    SEMICOLON, COMMA, PLUS, MINUS, TIMES, DIV, POW, DOT, EQUAL, 
+    LOWER})
+
+    def __init__(self,sourceCode,sourceCodeName):
+        self.stack = list()
+        self.state_error = False
+        self.sourceCode = sourceCode
+        self.sourceCodeName = sourceCodeName
+
+    # Un-comment the following line to output the parser logs for debugging any conflicts
+
+    # This sets the order of execution. The last values will have a higher precedence
+    precedence = (
+        ('right', 'ASSIGN'),
+        ('left', 'AND'),
+        ('right', 'NOT'),
+        ('nonassoc', 'LOWER', 'LOWER_EQUAL', 'EQUAL'),
+        ('left', 'PLUS', 'MINUS'),
+        ('left', 'TIMES', 'DIV'),
+        ('right', 'ISNULL'),
+        ('right', 'POW'),
+        ('left', 'DOT'),
+    )
+
+    start = 'program'
+
+    @_('class_ { class_ }')
+    def program(self,p):
+        nbr_class = 1+len(p[1])
+        pr = program()
+        
+        while nbr_class > 0:
+            pr.classes.append(self.stack.pop(-nbr_class))
+            nbr_class-=1
+        
+        return pr
+        
+    @_('CLASS TYPE_IDENTIFIER [ EXTENDS TYPE_IDENTIFIER ] class_body')
+    def class_(self,p):
+        c = class_(p[1],p[2][1],self.stack.pop())
+        self.stack.append(c)
+    
+    @_('LBRACE { field|method  } RBRACE')
+    def class_body(self,p):
+        nbr_field_and_method = len(p[1])
+        cb = class_body() 
+        while nbr_field_and_method > 0:
+            if len(self.stack) > 0 and type(self.stack[-nbr_field_and_method]) is field:
+                cb.fields.append(self.stack.pop(-nbr_field_and_method))
+            elif len(self.stack) > 0 and type(self.stack[-nbr_field_and_method]) is method:
+                cb.methods.append(self.stack.pop(-nbr_field_and_method))
+            nbr_field_and_method -= 1
+        
+        self.stack.append(cb)
+        
+    @_('OBJECT_IDENTIFIER COLON type_ [ ASSIGN expr ] SEMICOLON')
+    def field(self,p):
+        
+        if '<-' in p[3]:
+            expr = self.stack.pop()
+            type_ = self.stack.pop()
+            f = field(p[0],type_,expr)
+        else:
+            type_ = self.stack.pop()
+            f = field(p[0],type_,None)
+        
+        self.stack.append(f)
+        
+    @_('OBJECT_IDENTIFIER LPAR [ formals ] RPAR COLON type_ block')
+    def method(self,p):
+
+        if len(self.stack) > 2 and type(self.stack[-3]) is formals:
+            b = self.stack.pop()
+            type_ = self.stack.pop()
+            f = self.stack.pop()
+            m = method(p[0],f,type_,b)
+        else:
+            b = self.stack.pop()
+            type_ = self.stack.pop()
+            m = method(p[0],formals(),type_,b)
+        
+        self.stack.append(m)
+    
+    @_('TYPE_IDENTIFIER','INT32','BOOL','STRING','UNIT')
+    def type_(self,p):
+        self.stack.append(p[0])
+    
+    @_('formal { COMMA formal }')
+    def formals(self,p):
+        nbr_formal = 1+len(p[1])
+        f = formals()
+        while nbr_formal > 0:
+            f.formal.append(self.stack.pop(-nbr_formal))
+            nbr_formal -=1
+        
+        self.stack.append(f)
+    
+    @_('OBJECT_IDENTIFIER COLON type_')
+    def formal(self,p):
+        f = formal(p[0],self.stack.pop())
+        self.stack.append(f)
+    
+    @_('LBRACE expr { SEMICOLON expr } RBRACE')
+    def block(self,p):
+        nbr_expr = 1+len(p[2])
+        b = block()
+        while nbr_expr >0:
+            b.exprs.append(self.stack.pop(-nbr_expr))
+            nbr_expr -= 1
+        
+        self.stack.append(b)
+    
+    @_('IF expr THEN expr [ ELSE expr ]')
+    def expr(self,p):
+        
+        if 'else' in p[-1]:
+            else_expr = self.stack.pop()
+            then_expr = self.stack.pop()
+            cond_expr = self.stack.pop()
+            i = if_(cond_expr,then_expr,else_expr)
+        else:
+            then_expr = self.stack.pop()
+            cond_expr = self.stack.pop()
+            i = if_(cond_expr,then_expr,None)
+        
+        self.stack.append(i)
+            
+    @_('WHILE expr DO expr')
+    def expr(self,p):
+        
+        expr_body = self.stack.pop()
+        expr_cond = self.stack.pop()
+
+        w = while_(expr_cond,expr_body)
+
+        self.stack.append(w)
+    
+    @_('LET OBJECT_IDENTIFIER COLON type_ [ ASSIGN expr ] IN expr')
+    def expr(self,p):
+        
+        if '<-' in p[4]:
+            expr_in = self.stack.pop()
+            expr_ass = self.stack.pop()
+            type_ = self.stack.pop()
+            l = let(p[1],type_,expr_ass,expr_in)
+        else:
+            expr = self.stack.pop()
+            type_ = self.stack.pop()
+            l = let(p[1],type_,None,expr)
+
+        self.stack.append(l)
+        
+    @_('OBJECT_IDENTIFIER ASSIGN expr')
+    def expr(self,p):
+        ass = assign(p[0],self.stack.pop())
+        self.stack.append(ass)
+    
+    @_('NOT expr')
+    def expr(self,p):
+        not_ = unary('not',self.stack.pop())
+        self.stack.append(not_)
+    
+    @_('expr AND expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('and',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr LOWER_EQUAL expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('<=',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr LOWER expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('<',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr EQUAL expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('=',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr MINUS expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('-',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr PLUS expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('+',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr DIV expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('/',exp1,exp2)
+        self.stack.append(binop)
+
+    @_('expr TIMES expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('*',exp1,exp2)
+        self.stack.append(binop)
+    
+    @_('expr POW expr')
+    def expr(self,p):
+        exp2 = self.stack.pop()
+        exp1 = self.stack.pop()
+        binop = binary('^',exp1,exp2)
+        self.stack.append(binop)
+
+    @_('MINUS expr')
+    def expr(self,p):
+        minus = unary('-',self.stack.pop())
+        self.stack.append(minus)
+    
+    @_('ISNULL expr')
+    def expr(self,p):
+        is_null = unary('isnull',self.stack.pop())
+        self.stack.append(is_null)
+
+    @_('OBJECT_IDENTIFIER LPAR [ args ] RPAR')
+    def expr(self,p):
+
+        if type(self.stack[-1]) is args:
+            c = call(self_(),p[0],self.stack.pop())
+        else:
+            c = call(self_(),p[0],args())
+        
+        self.stack.append(c)
+    
+    @_('expr DOT OBJECT_IDENTIFIER LPAR [ args ] RPAR')
+    def expr(self,p):
+        
+        if type(self.stack[-1]) is args:
+            args_ = self.stack.pop()
+            m_name = self.stack.pop()
+            c = call(m_name,p[2],args_)
+        else:
+            m_name = self.stack.pop()
+            c = call(m_name,p[2],args()) 
+        
+        self.stack.append(c)
+    
+    @_('NEW TYPE_IDENTIFIER')
+    def expr(self,p):
+        n = new(p[1])
+        self.stack.append(n)
+    
+    @_('OBJECT_IDENTIFIER')
+    def expr(self,p):
+        o = obj_id(p[0])
+        self.stack.append(o)
+
+    @_('SELF')
+    def expr(self,p):
+        s = self_()
+        self.stack.append(s)
+
+    @_('literal')
+    def expr(self,p):
+        pass
+    
+    @_('LPAR RPAR')
+    def expr(self,p):
+        p = par('()')
+        self.stack.append(p)
+ 
+    @_('LPAR expr RPAR')
+    def expr(self,p):
+        pass
+    
+    @_('block')
+    def expr(self,p):
+        pass
+
+    @_('expr { COMMA expr } ')
+    def args(self,p):
+        nbr_expr = 1+len(p[1])
+        args_ = args()
+        
+        while nbr_expr >0:
+            args_.expr.append(self.stack.pop(-nbr_expr))
+            nbr_expr -= 1
+        
+        self.stack.append(args_)
+
+    @_('INTEGER_LITERAL','STRING_LITERAL','boolean_literal')
+    def literal(self, p):
+        """
+        literal = integer-literal | string-literal | boolean_literal
+        """
+        if (type(p[0]) is int)or (type(p[0]) is str):
+            l = literal(p[0])
+            self.stack.append(l)
+        
+    @_('TRUE','FALSE')
+    def boolean_literal(self,p):
+        """
+        boolean_literal = "true" | "false"
+        """
+        l = literal(p[0])
+        self.stack.append(l)
+    
+    def find_column(self,text, token):
+        
+        last_cr = text.rfind('\n', 0, token.index) + 1
+        column = (token.index - last_cr) + 1
+        
+        return column
+
+    def error(self,p):
+        if p != None:
+            line = p.lineno
+            column = self.find_column(self.sourceCode,p)
+            print_error(self.sourceCodeName,line,column)
+        else :
+            line = self.sourceCode.count('\n') + 2
+            column = 1
+            print_error(self.sourceCodeName,line,column)
+
+def make_ast(data,source_file):
+    
+    lexer = CalcLexer(data,source_file)
+    parser = CalcParser(data,source_file)
+    ast = parser.parse(lexer.tokenize(data))
+
+    if(len(lexer.multiple_line_com) != 0):
+        error(source_file,lexer.multiple_line_com[-1][0],lexer.multiple_line_com[-1][1],"EOF in multiple line comment")
+    
+    if not parser.state_error:
+        ast.display()
+    else:
+        exit(1)
+
+def print_error(filename,line,column):
+    #Print the error on the stderr in the good format
+    sys.exit('{}:{}:{}: syntax error'.format(filename, line, column))
